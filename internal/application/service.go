@@ -49,6 +49,9 @@ func (s *Service) CreateBatch(ctx context.Context, in CreateBatchInput, key stri
 	return s.saveCreated(ctx, b, key)
 }
 func (s *Service) AddSample(ctx context.Context, id string, expected int, sample domain.Sample, key string) (Result, error) {
+	if e := ctx.Err(); e != nil {
+		return Result{}, e
+	}
 	b, e := s.loadVersion(ctx, id, expected)
 	if e != nil {
 		return Result{}, e
@@ -198,6 +201,9 @@ func (s *Service) Verify(ctx context.Context, id, code string) (bool, error) {
 	return chainValid && b.Credential.EvidenceDigest == digest && b.Credential.VerificationCode == code, nil
 }
 func (s *Service) loadVersion(ctx context.Context, id string, v int) (domain.RestorationBatch, error) {
+	if e := ctx.Err(); e != nil {
+		return domain.RestorationBatch{}, e
+	}
 	b, e := s.repo.Get(ctx, id)
 	if e != nil {
 		return b, e
@@ -211,6 +217,9 @@ func (s *Service) loadVersion(ctx context.Context, id string, v int) (domain.Res
 	return b, nil
 }
 func (s *Service) save(ctx context.Context, b domain.RestorationBatch, event, key string) (Result, error) {
+	if e := ctx.Err(); e != nil {
+		return Result{}, e
+	}
 	if key != "" {
 		if raw, ok := s.repo.GetIdempotent(ctx, b.BatchID, key); ok {
 			var r Result

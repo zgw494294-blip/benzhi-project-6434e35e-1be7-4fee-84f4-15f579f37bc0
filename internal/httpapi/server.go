@@ -3,6 +3,7 @@ package httpapi
 import (
 	"archive-deacidification/internal/application"
 	"archive-deacidification/internal/domain"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -181,6 +182,10 @@ func writeErr(w http.ResponseWriter, status int, code string, detail any) {
 func mapErr(w http.ResponseWriter, e error) {
 	status, code := 400, "INVALID_REQUEST"
 	switch {
+	case errors.Is(e, context.Canceled):
+		status, code = 499, "REQUEST_CANCELED"
+	case errors.Is(e, context.DeadlineExceeded):
+		status, code = 408, "REQUEST_TIMEOUT"
 	case errors.Is(e, domain.ErrNotFound):
 		status, code = 404, "NOT_FOUND"
 	case errors.Is(e, domain.ErrVersionConflict):
