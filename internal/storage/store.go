@@ -79,19 +79,37 @@ func (s *Store) SaveEvents(ctx context.Context, b domain.RestorationBatch, write
 	if len(writes) == 0 {
 		return nil, domain.ErrRequiredEvidence
 	}
+	previousBatch, batchExisted := s.data.Batches[b.BatchID]
+	previousEventCount := len(s.data.Events)
 	s.data.Batches[b.BatchID] = b
 	sequences := make([]int64, 0, len(writes))
 	for _, write := range writes {
 		ev, err := s.appendEventLocked(b.BatchID, write.Type, write.Payload)
 		if err != nil {
+			s.rollbackLocked(b.BatchID, previousBatch, batchExisted, previousEventCount)
 			return nil, err
 		}
 		sequences = append(sequences, ev.Seq)
 	}
 	if err := s.persist(); err != nil {
+		s.rollbackLocked(b.BatchID, previousBatch, batchExisted, previousEventCount)
 		return nil, err
 	}
 	return sequences, nil
+}
+
+// rollbackLocked restores the in-memory state to what it was before a failed
+// mutation so that subsequent reads observe the last successfully persisted
+// data, version and audit events. Callers must hold s.mu.
+func (s *Store) rollbackLocked(batchID string, previous domain.RestorationBatch, existed bool, eventCount int) {
+	if existed {
+		s.data.Batches[batchID] = previous
+	} else {
+		delete(s.data.Batches, batchID)
+	}
+	if eventCount <= len(s.data.Events) {
+		s.data.Events = s.data.Events[:eventCount]
+	}
 }
 
 func (s *Store) Freeze(ctx context.Context, b *domain.RestorationBatch, eventType string) (int64, error) {
@@ -116,12 +134,11 @@ func (s *Store) Freeze(ctx context.Context, b *domain.RestorationBatch, eventTyp
 	s.data.Batches[b.BatchID] = *b
 	ev, err := s.appendEventLocked(b.BatchID, eventType, *b)
 	if err != nil {
-		s.data.Batches[b.BatchID] = current
+		s.rollbackLocked(b.BatchID, current, true, previousEventCount)
 		return 0, err
 	}
 	if err = s.persist(); err != nil {
-		s.data.Batches[b.BatchID] = current
-		s.data.Events = s.data.Events[:previousEventCount]
+		s.rollbackLocked(b.BatchID, current, true, previousEventCount)
 		return 0, err
 	}
 	return ev.Seq, nil

@@ -40,7 +40,13 @@ func (s *Store) ImportEvidence(ctx context.Context, raw []byte) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previousBatch, batchExisted := s.data.Batches[p.Batch.BatchID]
+	previousEventCount := len(s.data.Events)
 	s.data.Batches[p.Batch.BatchID] = p.Batch
 	s.data.Events = append(s.data.Events, p.Events...)
-	return s.persist()
+	if e := s.persist(); e != nil {
+		s.rollbackLocked(p.Batch.BatchID, previousBatch, batchExisted, previousEventCount)
+		return e
+	}
+	return nil
 }
