@@ -55,6 +55,146 @@ func (s *Store) persist() error {
 	}
 	return os.Rename(tmp, s.path)
 }
+func (s *Store) SaveEventsIdempotent(ctx context.Context, b domain.RestorationBatch, writes []EventWrite, key string, buildResponse func([]int64) []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key != "" {
+		if raw, ok := s.data.Idempotency[b.BatchID+"|"+key]; ok {
+			return raw, nil
+		}
+	}
+	if len(writes) == 0 {
+		return nil, domain.ErrRequiredEvidence
+	}
+	previous, existed := s.data.Batches[b.BatchID]
+	previousEventCount := len(s.data.Events)
+	s.data.Batches[b.BatchID] = b
+	sequences := make([]int64, 0, len(writes))
+	for _, write := range writes {
+		ev, err := s.appendEventLocked(b.BatchID, write.Type, write.Payload)
+		if err != nil {
+			s.rollbackBatchEventsLocked(b.BatchID, previous, existed, previousEventCount)
+			return nil, err
+		}
+		sequences = append(sequences, ev.Seq)
+	}
+	if err := s.persist(); err != nil {
+		s.rollbackBatchEventsLocked(b.BatchID, previous, existed, previousEventCount)
+		return nil, err
+	}
+	var response []byte
+	if buildResponse != nil {
+		response = buildResponse(sequences)
+	}
+	if key != "" && response != nil {
+		s.data.Idempotency[b.BatchID+"|"+key] = response
+		_ = s.persist()
+	}
+	return response, nil
+}
+
+func (s *Store) MutateIdempotent(ctx context.Context, batchID string, key string, mutate func(domain.RestorationBatch) (domain.RestorationBatch, []EventWrite, error), buildResponse func([]int64, domain.RestorationBatch) []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key != "" {
+		if raw, ok := s.data.Idempotency[batchID+"|"+key]; ok {
+			return raw, nil
+		}
+	}
+	current, ok := s.data.Batches[batchID]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	if current.Status == domain.StatusFrozen {
+		return nil, domain.ErrFrozen
+	}
+	b, writes, err := mutate(current)
+	if err != nil {
+		return nil, err
+	}
+	if len(writes) == 0 {
+		return nil, domain.ErrRequiredEvidence
+	}
+	previousEventCount := len(s.data.Events)
+	s.data.Batches[batchID] = b
+	sequences := make([]int64, 0, len(writes))
+	for _, write := range writes {
+		ev, err := s.appendEventLocked(batchID, write.Type, write.Payload)
+		if err != nil {
+			s.rollbackBatchEventsLocked(batchID, current, true, previousEventCount)
+			return nil, err
+		}
+		sequences = append(sequences, ev.Seq)
+	}
+	if err := s.persist(); err != nil {
+		s.rollbackBatchEventsLocked(batchID, current, true, previousEventCount)
+		return nil, err
+	}
+	var response []byte
+	if buildResponse != nil {
+		response = buildResponse(sequences, b)
+	}
+	if key != "" && response != nil {
+		s.data.Idempotency[batchID+"|"+key] = response
+		_ = s.persist()
+	}
+	return response, nil
+}
+
+func (s *Store) FreezeIdempotent(ctx context.Context, batchID string, key string, mutate func(*domain.RestorationBatch) (string, error), buildResponse func(int64) []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key != "" {
+		if raw, ok := s.data.Idempotency[batchID+"|"+key]; ok {
+			return raw, nil
+		}
+	}
+	current, ok := s.data.Batches[batchID]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	if current.Status == domain.StatusFrozen {
+		return nil, domain.ErrFrozen
+	}
+	b := current
+	eventType, err := mutate(&b)
+	if err != nil {
+		return nil, err
+	}
+	if b.Credential == nil {
+		return nil, domain.ErrRequiredEvidence
+	}
+	if current.Version+1 != b.Version {
+		return nil, domain.ErrVersionConflict
+	}
+	if err := s.verifyChainLocked(batchID); err != nil {
+		return nil, err
+	}
+	events := s.eventsLocked(batchID)
+	b.Credential.AuditSequence = int64(len(events) + 1)
+	previousEventCount := len(s.data.Events)
+	s.data.Batches[batchID] = b
+	ev, err := s.appendEventLocked(batchID, eventType, b)
+	if err != nil {
+		s.data.Batches[batchID] = current
+		return nil, err
+	}
+	if err = s.persist(); err != nil {
+		s.data.Batches[batchID] = current
+		s.data.Events = s.data.Events[:previousEventCount]
+		return nil, err
+	}
+	var response []byte
+	if buildResponse != nil {
+		response = buildResponse(ev.Seq)
+	}
+	if key != "" && response != nil {
+		s.data.Idempotency[batchID+"|"+key] = response
+		_ = s.persist()
+	}
+	return response, nil
+}
+
 func (s *Store) Close() error { s.mu.Lock(); defer s.mu.Unlock(); return s.persist() }
 func (s *Store) Get(ctx context.Context, id string) (domain.RestorationBatch, error) {
 	s.mu.Lock()

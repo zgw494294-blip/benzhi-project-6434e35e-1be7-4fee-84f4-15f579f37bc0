@@ -49,123 +49,143 @@ func (s *Service) CreateBatch(ctx context.Context, in CreateBatchInput, key stri
 	return s.saveCreated(ctx, b, key)
 }
 func (s *Service) AddSample(ctx context.Context, id string, expected int, sample domain.Sample, key string) (Result, error) {
-	b, e := s.loadVersion(ctx, id, expected)
-	if e != nil {
-		return Result{}, e
-	}
 	sample.BatchID = id
 	domain.NormalizeSample(&sample)
-	if _, exists := domain.SampleByID(b, sample.SampleID); exists {
-		return Result{}, fmt.Errorf("%w: %s", domain.ErrSampleDuplicate, sample.SampleID)
+	mutate := func(b domain.RestorationBatch) (domain.RestorationBatch, []storage.EventWrite, error) {
+		if e := checkVersion(b, expected); e != nil {
+			return b, nil, e
+		}
+		if _, exists := domain.SampleByID(b, sample.SampleID); exists {
+			return b, nil, fmt.Errorf("%w: %s", domain.ErrSampleDuplicate, sample.SampleID)
+		}
+		if e := domain.ValidateSample(sample); e != nil {
+			return b, nil, e
+		}
+		if e := b.AddSample(sample); e != nil {
+			return b, nil, e
+		}
+		return b, []storage.EventWrite{{Type: "sample.recorded", Payload: b}}, nil
 	}
-	if e = domain.ValidateSample(sample); e != nil {
-		return Result{}, e
-	}
-	if e = b.AddSample(sample); e != nil {
-		return Result{}, e
-	}
-	return s.save(ctx, b, "sample.recorded", key)
+	return s.mutate(ctx, id, key, mutate)
 }
 func (s *Service) AddTrial(ctx context.Context, id string, expected int, t domain.ProcessTrial, key string) (Result, error) {
-	b, e := s.loadVersion(ctx, id, expected)
-	if e != nil {
-		return Result{}, e
-	}
 	t.BatchID = id
 	domain.NormalizeTrial(&t)
-	if _, exists := domain.TrialByID(b, t.TrialID); exists {
-		return Result{}, fmt.Errorf("%w: %s", domain.ErrTrialDuplicate, t.TrialID)
+	mutate := func(b domain.RestorationBatch) (domain.RestorationBatch, []storage.EventWrite, error) {
+		if e := checkVersion(b, expected); e != nil {
+			return b, nil, e
+		}
+		if _, exists := domain.TrialByID(b, t.TrialID); exists {
+			return b, nil, fmt.Errorf("%w: %s", domain.ErrTrialDuplicate, t.TrialID)
+		}
+		if e := domain.ValidateTrial(t); e != nil {
+			return b, nil, e
+		}
+		if e := b.AddTrial(t); e != nil {
+			return b, nil, e
+		}
+		return b, []storage.EventWrite{{Type: "trial.analyzed", Payload: b}}, nil
 	}
-	if e = domain.ValidateTrial(t); e != nil {
-		return Result{}, e
-	}
-	if e = b.AddTrial(t); e != nil {
-		return Result{}, e
-	}
-	return s.save(ctx, b, "trial.analyzed", key)
+	return s.mutate(ctx, id, key, mutate)
 }
 func (s *Service) AddRetest(ctx context.Context, id string, expected int, r domain.CorrectionRetest, key string) (Result, error) {
-	b, e := s.loadVersion(ctx, id, expected)
-	if e != nil {
-		return Result{}, e
-	}
 	r.BatchID = id
 	if strings.TrimSpace(r.RetestID) == "" {
 		r.RetestID = newID()
 	}
 	domain.NormalizeRetest(&r)
-	for _, existing := range b.Retests {
-		if existing.RetestID == r.RetestID {
-			return Result{}, fmt.Errorf("%w: %s", domain.ErrRetestDuplicate, r.RetestID)
-		}
-	}
 	if r.SubmittedAt.IsZero() {
 		r.SubmittedAt = time.Now().UTC()
 	}
-	if e = b.AddRetest(r); e != nil {
-		return Result{}, e
+	mutate := func(b domain.RestorationBatch) (domain.RestorationBatch, []storage.EventWrite, error) {
+		if e := checkVersion(b, expected); e != nil {
+			return b, nil, e
+		}
+		for _, existing := range b.Retests {
+			if existing.RetestID == r.RetestID {
+				return b, nil, fmt.Errorf("%w: %s", domain.ErrRetestDuplicate, r.RetestID)
+			}
+		}
+		if e := b.AddRetest(r); e != nil {
+			return b, nil, e
+		}
+		return b, []storage.EventWrite{{Type: "retest.submitted", Payload: b}}, nil
 	}
-	return s.save(ctx, b, "retest.submitted", key)
+	return s.mutate(ctx, id, key, mutate)
 }
 func (s *Service) Review(ctx context.Context, id string, expected int, approve bool, reviewer, reason, key string) (Result, error) {
-	b, e := s.loadVersion(ctx, id, expected)
-	if e != nil {
-		return Result{}, e
-	}
-	if e = domain.ValidateActor(reviewer); e != nil {
+	if e := domain.ValidateActor(reviewer); e != nil {
 		return Result{}, e
 	}
 	reviewer = strings.Join(strings.Fields(reviewer), " ")
 	reason = strings.TrimSpace(reason)
-	if e = domain.ValidateBatchForReview(&b); e != nil {
-		return Result{}, e
-	}
-	if b.Status != domain.StatusReview {
-		if e = b.Transition(domain.StatusReview); e != nil {
-			return Result{}, e
+	mutate := func(b domain.RestorationBatch) (domain.RestorationBatch, []storage.EventWrite, error) {
+		if e := checkVersion(b, expected); e != nil {
+			return b, nil, e
 		}
+		if e := domain.ValidateBatchForReview(&b); e != nil {
+			return b, nil, e
+		}
+		if b.Status != domain.StatusReview {
+			if e := b.Transition(domain.StatusReview); e != nil {
+				return b, nil, e
+			}
+		}
+		next := domain.StatusRejected
+		if approve {
+			next = domain.StatusApproved
+		}
+		if e := b.Transition(next); e != nil {
+			return b, nil, e
+		}
+		payload := map[string]any{"reviewer": reviewer, "approve": approve, "reason": reason}
+		return b, []storage.EventWrite{{Type: "review.completed", Payload: payload}}, nil
 	}
-	next := domain.StatusRejected
-	if approve {
-		next = domain.StatusApproved
-	}
-	if e = b.Transition(next); e != nil {
-		return Result{}, e
-	}
-	payload := map[string]any{"reviewer": reviewer, "approve": approve, "reason": reason}
-	return s.save(ctx, b, "review.completed", keyWithPayload(key, payload))
+	idempotencyKey := keyWithPayload(key, map[string]any{"reviewer": reviewer, "approve": approve, "reason": reason})
+	return s.mutate(ctx, id, idempotencyKey, mutate)
 }
 func (s *Service) Freeze(ctx context.Context, id string, expected int, reviewer, key string) (Result, error) {
-	b, e := s.loadVersion(ctx, id, expected)
-	if e != nil {
-		return Result{}, e
-	}
-	if e = domain.ValidateActor(reviewer); e != nil {
+	if e := domain.ValidateActor(reviewer); e != nil {
 		return Result{}, e
 	}
 	reviewer = strings.Join(strings.Fields(reviewer), " ")
-	if b.Status != domain.StatusApproved {
-		return Result{}, domain.ErrInvalidTransition
+	var finalBatch *domain.RestorationBatch
+	mutate := func(b *domain.RestorationBatch) (string, error) {
+		if e := checkVersion(*b, expected); e != nil {
+			return "", e
+		}
+		if b.Status != domain.StatusApproved {
+			return "", domain.ErrInvalidTransition
+		}
+		if e := b.Transition(domain.StatusFrozen); e != nil {
+			return "", e
+		}
+		digest, e := domain.EvidenceDigest(b)
+		if e != nil {
+			return "", e
+		}
+		cred := &domain.ReleaseCredential{CredentialID: newID(), BatchID: id, EvidenceDigest: digest, Decision: "approved", Reviewer: reviewer, IssuedAt: time.Now().UTC()}
+		cred.VerificationCode = domain.VerificationCode(digest, cred.CredentialID)
+		b.ReleasedAt = &cred.IssuedAt
+		b.Credential = cred
+		finalBatch = b
+		return "release.frozen", nil
 	}
-	if e = b.Transition(domain.StatusFrozen); e != nil {
-		return Result{}, e
-	}
-	digest, e := domain.EvidenceDigest(&b)
+	raw, e := s.repo.FreezeIdempotent(ctx, id, key, mutate, func(seq int64) []byte {
+		r := Result{Sequence: seq}
+		if finalBatch != nil {
+			r.Batch = *finalBatch
+			r.Credential = finalBatch.Credential
+		}
+		out, _ := json.Marshal(r)
+		return out
+	})
 	if e != nil {
 		return Result{}, e
 	}
-	cred := &domain.ReleaseCredential{CredentialID: newID(), BatchID: id, EvidenceDigest: digest, Decision: "approved", Reviewer: reviewer, IssuedAt: time.Now().UTC()}
-	cred.VerificationCode = domain.VerificationCode(digest, cred.CredentialID)
-	b.ReleasedAt = &cred.IssuedAt
-	b.Credential = cred
-	seq, e := s.repo.Freeze(ctx, &b, "release.frozen")
-	if e != nil {
-		return Result{}, e
-	}
-	r := Result{Batch: b, Sequence: seq, Credential: b.Credential}
-	if key != "" {
-		raw, _ := json.Marshal(r)
-		_ = s.repo.PutIdempotent(ctx, b.BatchID, key, raw)
+	var r Result
+	if json.Unmarshal(raw, &r) != nil {
+		return Result{}, fmt.Errorf("internal: failed to decode idempotent response")
 	}
 	return r, nil
 }
@@ -210,22 +230,31 @@ func (s *Service) loadVersion(ctx context.Context, id string, v int) (domain.Res
 	}
 	return b, nil
 }
-func (s *Service) save(ctx context.Context, b domain.RestorationBatch, event, key string) (Result, error) {
-	if key != "" {
-		if raw, ok := s.repo.GetIdempotent(ctx, b.BatchID, key); ok {
-			var r Result
-			if json.Unmarshal(raw, &r) == nil {
-				return r, nil
-			}
+func checkVersion(b domain.RestorationBatch, v int) error {
+	if v > 0 && b.Version != v {
+		return domain.ErrVersionConflict
+	}
+	return nil
+}
+func (s *Service) mutate(ctx context.Context, id, key string, mutate func(domain.RestorationBatch) (domain.RestorationBatch, []storage.EventWrite, error)) (Result, error) {
+	buildResponse := func(sequences []int64, b domain.RestorationBatch) []byte {
+		seq := int64(0)
+		if len(sequences) > 0 {
+			seq = sequences[len(sequences)-1]
 		}
-	}
-	seq, e := s.repo.Save(ctx, b, event, b)
-	r := Result{Batch: b, Sequence: seq, Credential: b.Credential}
-	if e == nil && key != "" {
+		r := Result{Batch: b, Sequence: seq, Credential: b.Credential}
 		raw, _ := json.Marshal(r)
-		_ = s.repo.PutIdempotent(ctx, b.BatchID, key, raw)
+		return raw
 	}
-	return r, e
+	raw, e := s.repo.MutateIdempotent(ctx, id, key, mutate, buildResponse)
+	if e != nil {
+		return Result{}, e
+	}
+	var r Result
+	if json.Unmarshal(raw, &r) != nil {
+		return Result{}, fmt.Errorf("internal: failed to decode idempotent response")
+	}
+	return r, nil
 }
 
 func (s *Service) saveCreated(ctx context.Context, b domain.RestorationBatch, key string) (Result, error) {
@@ -235,16 +264,23 @@ func (s *Service) saveCreated(ctx context.Context, b domain.RestorationBatch, ke
 			"version": b.Version, "valid": true, "statistics": b.DocumentStats,
 		}},
 	}
-	sequences, e := s.repo.SaveEvents(ctx, b, writes)
-	r := Result{Batch: b}
-	if len(sequences) > 0 {
-		r.Sequence = sequences[len(sequences)-1]
-	}
-	if e == nil && key != "" {
+	buildResponse := func(sequences []int64) []byte {
+		r := Result{Batch: b}
+		if len(sequences) > 0 {
+			r.Sequence = sequences[len(sequences)-1]
+		}
 		raw, _ := json.Marshal(r)
-		_ = s.repo.PutIdempotent(ctx, b.BatchID, key, raw)
+		return raw
 	}
-	return r, e
+	raw, e := s.repo.SaveEventsIdempotent(ctx, b, writes, key, buildResponse)
+	if e != nil {
+		return Result{}, e
+	}
+	var r Result
+	if json.Unmarshal(raw, &r) != nil {
+		return Result{}, fmt.Errorf("internal: failed to decode idempotent response")
+	}
+	return r, nil
 }
 func keyWithPayload(k string, v any) string {
 	if k == "" {
