@@ -56,6 +56,78 @@ func (s *Store) persist() error {
 	return os.Rename(tmp, s.path)
 }
 func (s *Store) Close() error { s.mu.Lock(); defer s.mu.Unlock(); return s.persist() }
+
+// cloneBatch 返回 b 的深拷贝，使调用方对切片、映射和凭据指针的修改
+// 不会影响存储内部的冻结状态或后续读取与凭据验真。
+func cloneBatch(b domain.RestorationBatch) domain.RestorationBatch {
+	out := b
+	if b.DocumentItems != nil {
+		out.DocumentItems = make([]domain.DocumentItem, len(b.DocumentItems))
+		copy(out.DocumentItems, b.DocumentItems)
+	}
+	if b.Samples != nil {
+		out.Samples = make([]domain.Sample, len(b.Samples))
+		copy(out.Samples, b.Samples)
+	}
+	if b.Trials != nil {
+		out.Trials = make([]domain.ProcessTrial, len(b.Trials))
+		for i := range b.Trials {
+			t := b.Trials[i]
+			if t.MetricDeviations != nil {
+				t.MetricDeviations = append([]string(nil), t.MetricDeviations...)
+			}
+			if t.ParameterDeviations != nil {
+				t.ParameterDeviations = append([]string(nil), t.ParameterDeviations...)
+			}
+			if t.DeviationCodes != nil {
+				t.DeviationCodes = append([]string(nil), t.DeviationCodes...)
+			}
+			out.Trials[i] = t
+		}
+	}
+	if b.Retests != nil {
+		out.Retests = make([]domain.CorrectionRetest, len(b.Retests))
+		for i := range b.Retests {
+			r := b.Retests[i]
+			if r.Observations != nil {
+				r.Observations = cloneFloatMap(r.Observations)
+			}
+			out.Retests[i] = r
+		}
+	}
+	if b.DocumentStats.MaterialCount != nil {
+		out.DocumentStats.MaterialCount = cloneIntMap(b.DocumentStats.MaterialCount)
+	}
+	if b.CreatedAt != nil {
+		c := *b.CreatedAt
+		out.CreatedAt = &c
+	}
+	if b.ReleasedAt != nil {
+		c := *b.ReleasedAt
+		out.ReleasedAt = &c
+	}
+	if b.Credential != nil {
+		c := *b.Credential
+		out.Credential = &c
+	}
+	return out
+}
+
+func cloneIntMap(m map[string]int) map[string]int {
+	out := make(map[string]int, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneFloatMap(m map[string]float64) map[string]float64 {
+	out := make(map[string]float64, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
 func (s *Store) Get(ctx context.Context, id string) (domain.RestorationBatch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -63,7 +135,7 @@ func (s *Store) Get(ctx context.Context, id string) (domain.RestorationBatch, er
 	if !ok {
 		return domain.RestorationBatch{}, domain.ErrNotFound
 	}
-	return b, nil
+	return cloneBatch(b), nil
 }
 func (s *Store) Save(ctx context.Context, b domain.RestorationBatch, eventType string, payload any) (int64, error) {
 	sequences, err := s.SaveEvents(ctx, b, []EventWrite{{Type: eventType, Payload: payload}})
