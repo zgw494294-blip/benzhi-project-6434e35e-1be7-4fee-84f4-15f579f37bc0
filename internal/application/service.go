@@ -28,9 +28,15 @@ type CreateBatchInput struct {
 }
 
 func (s *Service) CreateBatch(ctx context.Context, in CreateBatchInput, key string) (Result, error) {
+	if r, ok := s.cachedIdempotent(ctx, in.BatchID, key); ok {
+		return r, nil
+	}
 	b := domain.RestorationBatch{BatchID: in.BatchID, Title: in.Title, Institution: in.Institution, TargetProcess: in.TargetProcess, CreatedBy: in.CreatedBy, DocumentItems: in.Items, Status: domain.StatusDraft, Version: 1}
 	if b.BatchID == "" {
 		b.BatchID = newID()
+	}
+	if r, ok := s.cachedIdempotent(ctx, b.BatchID, key); ok {
+		return r, nil
 	}
 	domain.NormalizeBatch(&b)
 	if b.Title == "" || b.CreatedBy == "" {
@@ -49,6 +55,9 @@ func (s *Service) CreateBatch(ctx context.Context, in CreateBatchInput, key stri
 	return s.saveCreated(ctx, b, key)
 }
 func (s *Service) AddSample(ctx context.Context, id string, expected int, sample domain.Sample, key string) (Result, error) {
+	if r, ok := s.cachedIdempotent(ctx, id, key); ok {
+		return r, nil
+	}
 	b, e := s.loadVersion(ctx, id, expected)
 	if e != nil {
 		return Result{}, e
@@ -67,6 +76,9 @@ func (s *Service) AddSample(ctx context.Context, id string, expected int, sample
 	return s.save(ctx, b, "sample.recorded", key)
 }
 func (s *Service) AddTrial(ctx context.Context, id string, expected int, t domain.ProcessTrial, key string) (Result, error) {
+	if r, ok := s.cachedIdempotent(ctx, id, key); ok {
+		return r, nil
+	}
 	b, e := s.loadVersion(ctx, id, expected)
 	if e != nil {
 		return Result{}, e
@@ -85,6 +97,9 @@ func (s *Service) AddTrial(ctx context.Context, id string, expected int, t domai
 	return s.save(ctx, b, "trial.analyzed", key)
 }
 func (s *Service) AddRetest(ctx context.Context, id string, expected int, r domain.CorrectionRetest, key string) (Result, error) {
+	if res, ok := s.cachedIdempotent(ctx, id, key); ok {
+		return res, nil
+	}
 	b, e := s.loadVersion(ctx, id, expected)
 	if e != nil {
 		return Result{}, e
@@ -108,6 +123,11 @@ func (s *Service) AddRetest(ctx context.Context, id string, expected int, r doma
 	return s.save(ctx, b, "retest.submitted", key)
 }
 func (s *Service) Review(ctx context.Context, id string, expected int, approve bool, reviewer, reason, key string) (Result, error) {
+	reviewer = strings.Join(strings.Fields(reviewer), " ")
+	reason = strings.TrimSpace(reason)
+	if r, ok := s.cachedIdempotent(ctx, id, keyWithPayload(key, map[string]any{"reviewer": reviewer, "approve": approve, "reason": reason})); ok {
+		return r, nil
+	}
 	b, e := s.loadVersion(ctx, id, expected)
 	if e != nil {
 		return Result{}, e
@@ -115,8 +135,6 @@ func (s *Service) Review(ctx context.Context, id string, expected int, approve b
 	if e = domain.ValidateActor(reviewer); e != nil {
 		return Result{}, e
 	}
-	reviewer = strings.Join(strings.Fields(reviewer), " ")
-	reason = strings.TrimSpace(reason)
 	if e = domain.ValidateBatchForReview(&b); e != nil {
 		return Result{}, e
 	}
@@ -136,6 +154,9 @@ func (s *Service) Review(ctx context.Context, id string, expected int, approve b
 	return s.save(ctx, b, "review.completed", keyWithPayload(key, payload))
 }
 func (s *Service) Freeze(ctx context.Context, id string, expected int, reviewer, key string) (Result, error) {
+	if r, ok := s.cachedIdempotent(ctx, id, key); ok {
+		return r, nil
+	}
 	b, e := s.loadVersion(ctx, id, expected)
 	if e != nil {
 		return Result{}, e
@@ -210,15 +231,21 @@ func (s *Service) loadVersion(ctx context.Context, id string, v int) (domain.Res
 	}
 	return b, nil
 }
-func (s *Service) save(ctx context.Context, b domain.RestorationBatch, event, key string) (Result, error) {
-	if key != "" {
-		if raw, ok := s.repo.GetIdempotent(ctx, b.BatchID, key); ok {
-			var r Result
-			if json.Unmarshal(raw, &r) == nil {
-				return r, nil
-			}
-		}
+func (s *Service) cachedIdempotent(ctx context.Context, batch, key string) (Result, bool) {
+	if key == "" {
+		return Result{}, false
 	}
+	raw, ok := s.repo.GetIdempotent(ctx, batch, key)
+	if !ok {
+		return Result{}, false
+	}
+	var r Result
+	if json.Unmarshal(raw, &r) != nil {
+		return Result{}, false
+	}
+	return r, true
+}
+func (s *Service) save(ctx context.Context, b domain.RestorationBatch, event, key string) (Result, error) {
 	seq, e := s.repo.Save(ctx, b, event, b)
 	r := Result{Batch: b, Sequence: seq, Credential: b.Credential}
 	if e == nil && key != "" {
