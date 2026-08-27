@@ -34,9 +34,7 @@ func (s *Store) Restore(ctx context.Context, path string) error {
 		return e
 	}
 	var d fileData
-	if e = json.Unmarshal(raw, &d); e != nil {
-		return e
-	}
+	decodeErr := json.Unmarshal(raw, &d)
 	if d.Batches == nil {
 		d.Batches = map[string]domain.RestorationBatch{}
 	}
@@ -46,5 +44,8 @@ func (s *Store) Restore(ctx context.Context, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data = d
+	if decodeErr != nil {
+		return decodeErr
+	}
 	return s.persist()
 }
