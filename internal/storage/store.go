@@ -36,7 +36,10 @@ func Open(path string) (*Store, error) {
 	s := &Store{path: path, data: fileData{Batches: map[string]domain.RestorationBatch{}, Idempotency: map[string][]byte{}}}
 	if path != "" && !strings.HasPrefix(path, "file:") {
 		if raw, e := os.ReadFile(path); e == nil {
-			_ = json.Unmarshal(raw, &s.data)
+			var loaded fileData
+			if json.Unmarshal(raw, &loaded) == nil {
+				s.data = loaded
+			}
 		}
 	}
 	return s, nil
