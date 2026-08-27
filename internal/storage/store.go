@@ -181,7 +181,11 @@ func eventDigest(event AuditEvent) string {
 func (s *Store) Events(ctx context.Context, id string) ([]AuditEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.eventsLocked(id), nil
+	events := s.eventsLocked(id)
+	// Return an independent slice so callers cannot reorder or replace stored entries.
+	result := make([]AuditEvent, len(events))
+	copy(result, events)
+	return result, nil
 }
 func (s *Store) GetIdempotent(ctx context.Context, batch, key string) ([]byte, bool) {
 	s.mu.Lock()
