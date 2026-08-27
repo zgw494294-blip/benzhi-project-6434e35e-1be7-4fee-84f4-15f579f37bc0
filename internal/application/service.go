@@ -10,12 +10,19 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
-type Service struct{ repo storage.Repository }
+type Service struct {
+	repo         storage.Repository
+	summaryMu    sync.Mutex
+	summaryCache map[string]summaryCacheEntry
+}
 
-func New(repo storage.Repository) *Service { return &Service{repo: repo} }
+func New(repo storage.Repository) *Service {
+	return &Service{repo: repo, summaryCache: map[string]summaryCacheEntry{}}
+}
 
 type Result struct {
 	Batch      domain.RestorationBatch   `json:"batch"`

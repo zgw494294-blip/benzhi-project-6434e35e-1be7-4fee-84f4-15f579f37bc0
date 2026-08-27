@@ -5,13 +5,41 @@ import (
 	"context"
 )
 
+type summaryCacheEntry struct {
+	version int
+	summary domain.BatchSummary
+}
+
 func (s *Service) Summary(ctx context.Context, id string) (domain.BatchSummary, error) {
+	s.summaryMu.Lock()
+	if cached, ok := s.summaryCache[id]; ok {
+		summary := cloneBatchSummary(cached.summary)
+		s.summaryMu.Unlock()
+		return summary, nil
+	}
+	s.summaryMu.Unlock()
+
 	b, e := s.Snapshot(ctx, id)
 	if e != nil {
 		return domain.BatchSummary{}, e
 	}
-	return domain.Summarize(b), nil
+	summary := domain.Summarize(b)
+	s.summaryMu.Lock()
+	s.summaryCache[id] = summaryCacheEntry{version: b.Version, summary: cloneBatchSummary(summary)}
+	s.summaryMu.Unlock()
+	return summary, nil
 }
+
+func cloneBatchSummary(in domain.BatchSummary) domain.BatchSummary {
+	out := in
+	out.MaterialCount = make(map[string]int, len(in.MaterialCount))
+	for material, count := range in.MaterialCount {
+		out.MaterialCount[material] = count
+	}
+	out.SamplingCoverage.Materials = append([]domain.MaterialCoverage(nil), in.SamplingCoverage.Materials...)
+	return out
+}
+
 func (s *Service) EnsureExpected(ctx context.Context, id string, expected int) error {
 	_, e := s.loadVersion(ctx, id, expected)
 	return e
