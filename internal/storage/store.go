@@ -79,32 +79,19 @@ func (s *Store) SaveEvents(ctx context.Context, b domain.RestorationBatch, write
 	if len(writes) == 0 {
 		return nil, domain.ErrRequiredEvidence
 	}
-	previous, existed := s.data.Batches[b.BatchID]
-	previousEventCount := len(s.data.Events)
 	s.data.Batches[b.BatchID] = b
 	sequences := make([]int64, 0, len(writes))
 	for _, write := range writes {
 		ev, err := s.appendEventLocked(b.BatchID, write.Type, write.Payload)
 		if err != nil {
-			s.rollbackBatchEventsLocked(b.BatchID, previous, existed, previousEventCount)
 			return nil, err
 		}
 		sequences = append(sequences, ev.Seq)
 	}
 	if err := s.persist(); err != nil {
-		s.rollbackBatchEventsLocked(b.BatchID, previous, existed, previousEventCount)
 		return nil, err
 	}
 	return sequences, nil
-}
-
-func (s *Store) rollbackBatchEventsLocked(batchID string, previous domain.RestorationBatch, existed bool, eventCount int) {
-	if existed {
-		s.data.Batches[batchID] = previous
-	} else {
-		delete(s.data.Batches, batchID)
-	}
-	s.data.Events = s.data.Events[:eventCount]
 }
 
 func (s *Store) Freeze(ctx context.Context, b *domain.RestorationBatch, eventType string) (int64, error) {
